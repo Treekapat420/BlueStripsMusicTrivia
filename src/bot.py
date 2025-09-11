@@ -26,8 +26,9 @@ HELP = (
     "Admins: /admin status | endweek | payout | reset"
 )
 
-# NEW: per-chat round state
-CURRENT_ROUND = {}  # chat_id -> {"correct": "A", "deadline": ts, "answers": {user_id: "A"}, "task": asyncio.Task}
+# Per-chat round state:
+# chat_id -> {"correct": "A", "deadline": ts, "answers": {tg_id: (choice, ts)}, "task": asyncio.Task}
+CURRENT_ROUND = {}
 LOCKED_CHATS = set()
 
 def week_key():
@@ -126,7 +127,7 @@ async def _ask_question(msg: Message, q: dict):
     ]
     deadline = time.time() + settings.answer_seconds
 
-    # cancel any previous finalize task, just in case
+    # cancel any existing finalize task for this chat
     old = CURRENT_ROUND.get(msg.chat.id)
     if old and old.get("task"):
         try:
@@ -137,8 +138,8 @@ async def _ask_question(msg: Message, q: dict):
     CURRENT_ROUND[msg.chat.id] = {
         "correct": q["correct_opt"],
         "deadline": deadline,
-        "answers": {},  # user_id -> choice
-        "task": asyncio.create_task(_finalize_question_after(msg.chat.id, msg.chat.type))
+        "answers": {},  # {tg_id: (choice, ts)}
+        "task": asyncio.create_task(_finalize_question_after(msg.chat.id, msg.chat.type)),
     }
 
     await msg.answer("\n".join(lines), parse_mode="Markdown")
@@ -154,65 +155,64 @@ async def _finalize_question_after(chat_id: int, chat_type: str):
         return
 
     correct = round_state["correct"]
-    answers = round_state["answers"]
+    answers = round_state["answers"]  # {tg_id: (choice, ts)}
 
-    # Tally & award points
+    # Everyone who chose the correct option
+    correct_users = [(uid, ts) for uid, (choice, ts) in answers.items() if choice == correct]
+    # Earliest first for the +3 bonus
+    correct_users.sort(key=lambda x: x[1])
+
     awarded = []
     with SessionLocal() as s:
-        # Build a map: user_id -> (User, Score)
-        for user_id, choice in answers.items():
-            # skip late-tamper safety (not strictly needed, but fine)
-            if choice is None:
-                continue
-            # load user & weekly score row
+        for i, (user_id, _) in enumerate(correct_users):
             u = s.execute(select(User).where(User.tg_id == user_id)).scalar_one_or_none()
             if not u:
                 continue
-            sc = s.execute(select(Score).where(Score.user_id == u.id, Score.week_key == week_key())).scalar_one_or_none()
+            sc = s.execute(
+                select(Score).where(Score.user_id == u.id, Score.week_key == week_key())
+            ).scalar_one_or_none()
             if not sc:
-                # if someone answered without /join, auto-create score
                 sc = Score(user_id=u.id, week_key=week_key())
                 s.add(sc)
                 s.commit()
 
-            if choice == correct:
-                # award flat +10 (group mode); you can add streak logic if you like
-                sc.points += 10
-                sc.correct += 1
-                s.commit()
-                awarded.append(u)
+            # +10 for all correct, +3 extra for the FIRST correct
+            pts = 10 + (3 if i == 0 else 0)
+            sc.points += pts
+            sc.correct += 1
+            s.commit()
+            awarded.append((u, pts))
 
-    # Build a summary message
+    # Build the summary message
     total = len(answers)
-    correct_count = sum(1 for c in answers.values() if c == correct)
+    correct_count = len(correct_users)
     lines = [
         f"⏰ Time! Correct answer: *{correct}*",
         f"Answered: {total} • Correct: {correct_count}",
     ]
     if awarded:
-        names = ", ".join([f"@{u.username}" if u.username else str(u.tg_id) for u in awarded[:12]])
-        more = "" if len(awarded) <= 12 else f" +{len(awarded)-12} more"
-        lines.append(f"✅ Points awarded to: {names}{more}")
+        for u, pts in awarded[:12]:
+            name = f"@{u.username}" if u.username else str(u.tg_id)
+            lines.append(f"✅ {name} (+{pts})")
+        if len(awarded) > 12:
+            lines.append(f"...and {len(awarded)-12} more")
     else:
         lines.append("No correct answers this round.")
 
-    # send summary
-    # (we don't have Bot instance here; we can reply in chat via dp.bot in newer aiogram, but simpler:
-    # store a message object when asking. Alternatively, send via Bot API with chat_id.)
+    # Send and properly CLOSE the client session to avoid aiohttp warnings
+    from aiogram import Bot
     try:
-        # We need a Bot instance; easiest: import and create a temp Bot with the token (lightweight)
-        from aiogram import Bot
-        bot = Bot(settings.bot_token)
-        await bot.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
+        async with Bot(settings.bot_token) as bot:
+            await bot.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
     except Exception:
         pass
 
-    # clear round
+    # Clear round state
     CURRENT_ROUND.pop(chat_id, None)
 
 async def cmd_answer(msg: Message):
     parts = (msg.text or "").split()
-    if len(parts) != 2 or parts[1].upper() not in ("A","B","C","D"):
+    if len(parts) != 2 or parts[1].upper() not in ("A", "B", "C", "D"):
         return await msg.answer("Usage: /answer <A|B|C|D>")
 
     choice = parts[1].upper()
@@ -223,10 +223,10 @@ async def cmd_answer(msg: Message):
     if time.time() > st["deadline"]:
         return await msg.answer("Too late—time is up. Wait for the next question.")
 
-    # Create/refresh user, but pull out the primitive id before the session closes
+    # Capture primitive user id INSIDE the session (prevents DetachedInstanceError)
     with SessionLocal() as s:
         user = get_or_create_user(s, msg)
-        tg_id = int(user.tg_id)  # <- capture primitive
+        tg_id = int(user.tg_id)
 
     # Only first answer counts
     if tg_id in st["answers"]:
