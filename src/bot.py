@@ -223,14 +223,16 @@ async def cmd_answer(msg: Message):
     if time.time() > st["deadline"]:
         return await msg.answer("Too late—time is up. Wait for the next question.")
 
+    # Create/refresh user, but pull out the primitive id before the session closes
     with SessionLocal() as s:
         user = get_or_create_user(s, msg)
+        tg_id = int(user.tg_id)  # <- capture primitive
 
     # Only first answer counts
-    if user.tg_id in st["answers"]:
+    if tg_id in st["answers"]:
         return await msg.answer("You already locked in an answer for this question.")
 
-    st["answers"][user.tg_id] = (choice, time.time())
+    st["answers"][tg_id] = (choice, time.time())
     await msg.answer("✅ Answer locked in. Wait for the reveal!")
 
 async def cmd_leaderboard(msg: Message):
