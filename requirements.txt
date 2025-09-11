@@ -9,6 +9,3 @@ orjson==3.10.7
 pydantic==2.7.4
 # solana 0.30.x wants httpx <0.24
 httpx==0.23.3
-solana==0.30.2
-# match solana's constraint: >=0.18,<0.19
-solders==0.18.1
