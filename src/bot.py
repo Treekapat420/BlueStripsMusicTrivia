@@ -26,8 +26,8 @@ HELP = (
     "Admins: /admin status | endweek | payout | reset"
 )
 
-# In-memory state
-CURRENT_QUESTION = {}  # chat_id -> dict(question, correct, expires_at, started_at)
+# NEW: per-chat round state
+CURRENT_ROUND = {}  # chat_id -> {"correct": "A", "deadline": ts, "answers": {user_id: "A"}, "task": asyncio.Task}
 LOCKED_CHATS = set()
 
 def week_key():
@@ -121,46 +121,117 @@ async def _ask_question(msg: Message, q: dict):
         f"B) {mapping['B']}",
         f"C) {mapping['C']}",
         f"D) {mapping['D']}",
+        "",
+        f"_You have {settings.answer_seconds}s. Use_ `/answer A|B|C|D`",
     ]
-    CURRENT_QUESTION[msg.chat.id] = {
+    deadline = time.time() + settings.answer_seconds
+
+    # cancel any previous finalize task, just in case
+    old = CURRENT_ROUND.get(msg.chat.id)
+    if old and old.get("task"):
+        try:
+            old["task"].cancel()
+        except Exception:
+            pass
+
+    CURRENT_ROUND[msg.chat.id] = {
         "correct": q["correct_opt"],
-        "expires_at": time.time() + settings.answer_seconds,
-        "started_at": time.time()
+        "deadline": deadline,
+        "answers": {},  # user_id -> choice
+        "task": asyncio.create_task(_finalize_question_after(msg.chat.id, msg.chat.type))
     }
+
     await msg.answer("\n".join(lines), parse_mode="Markdown")
+    
+async def _finalize_question_after(chat_id: int, chat_type: str):
+    try:
+        await asyncio.sleep(settings.answer_seconds)
+    except asyncio.CancelledError:
+        return
+
+    round_state = CURRENT_ROUND.get(chat_id)
+    if not round_state:
+        return
+
+    correct = round_state["correct"]
+    answers = round_state["answers"]
+
+    # Tally & award points
+    awarded = []
+    with SessionLocal() as s:
+        # Build a map: user_id -> (User, Score)
+        for user_id, choice in answers.items():
+            # skip late-tamper safety (not strictly needed, but fine)
+            if choice is None:
+                continue
+            # load user & weekly score row
+            u = s.execute(select(User).where(User.tg_id == user_id)).scalar_one_or_none()
+            if not u:
+                continue
+            sc = s.execute(select(Score).where(Score.user_id == u.id, Score.week_key == week_key())).scalar_one_or_none()
+            if not sc:
+                # if someone answered without /join, auto-create score
+                sc = Score(user_id=u.id, week_key=week_key())
+                s.add(sc)
+                s.commit()
+
+            if choice == correct:
+                # award flat +10 (group mode); you can add streak logic if you like
+                sc.points += 10
+                sc.correct += 1
+                s.commit()
+                awarded.append(u)
+
+    # Build a summary message
+    total = len(answers)
+    correct_count = sum(1 for c in answers.values() if c == correct)
+    lines = [
+        f"⏰ Time! Correct answer: *{correct}*",
+        f"Answered: {total} • Correct: {correct_count}",
+    ]
+    if awarded:
+        names = ", ".join([f"@{u.username}" if u.username else str(u.tg_id) for u in awarded[:12]])
+        more = "" if len(awarded) <= 12 else f" +{len(awarded)-12} more"
+        lines.append(f"✅ Points awarded to: {names}{more}")
+    else:
+        lines.append("No correct answers this round.")
+
+    # send summary
+    # (we don't have Bot instance here; we can reply in chat via dp.bot in newer aiogram, but simpler:
+    # store a message object when asking. Alternatively, send via Bot API with chat_id.)
+    try:
+        # We need a Bot instance; easiest: import and create a temp Bot with the token (lightweight)
+        from aiogram import Bot
+        bot = Bot(settings.bot_token)
+        await bot.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
+    except Exception:
+        pass
+
+    # clear round
+    CURRENT_ROUND.pop(chat_id, None)
 
 async def cmd_answer(msg: Message):
     parts = (msg.text or "").split()
     if len(parts) != 2 or parts[1].upper() not in ("A","B","C","D"):
         return await msg.answer("Usage: /answer <A|B|C|D>")
+
     choice = parts[1].upper()
-    st = CURRENT_QUESTION.get(msg.chat.id)
+    st = CURRENT_ROUND.get(msg.chat.id)
     if not st:
         return await msg.answer("No active question. Use /quiz to start.")
-    if time.time() > st["expires_at"]:
-        CURRENT_QUESTION.pop(msg.chat.id, None)
-        return await msg.answer("Time's up! Start /quiz for the next question.")
 
-    correct = st["correct"]
-    elapsed = max(0.0, time.time() - st["started_at"])
-    time_bonus = max(0, int(max(0, settings.answer_seconds - elapsed) / (settings.answer_seconds / 5)))  # 0..5
+    if time.time() > st["deadline"]:
+        return await msg.answer("Too late—time is up. Wait for the next question.")
+
     with SessionLocal() as s:
         user = get_or_create_user(s, msg)
-        score = get_or_create_score(s, user)
-        if choice == correct:
-            score.points += 10 + min(5, time_bonus)
-            score.correct += 1
-            score.streak = min(settings.streak_bonus_cap, score.streak + 1)
-            score.points += min(settings.streak_bonus_cap, (score.streak - 1) * 2) if score.streak > 1 else 0
-            s.commit()
-            CURRENT_QUESTION.pop(msg.chat.id, None)
-            return await msg.answer(f"✅ Correct! +{10 + min(5, time_bonus)} (+streak) • Total: {score.points}")
-        else:
-            score.wrong += 1
-            score.streak = 0
-            s.commit()
-            CURRENT_QUESTION.pop(msg.chat.id, None)
-            return await msg.answer(f"❌ Nope. Correct answer was *{correct}*.", parse_mode="Markdown")
+
+    # Only first answer counts
+    if user.tg_id in st["answers"]:
+        return await msg.answer("You already locked in an answer for this question.")
+
+    st["answers"][user.tg_id] = (choice, time.time())
+    await msg.answer("✅ Answer locked in. Wait for the reveal!")
 
 async def cmd_leaderboard(msg: Message):
     with SessionLocal() as s:
