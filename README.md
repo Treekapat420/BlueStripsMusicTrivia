@@ -1,2 +1,0 @@
-# BlueStripsMusicTrivia
-Music trivia bot
