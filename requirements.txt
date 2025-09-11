@@ -5,9 +5,10 @@ alembic==1.13.2
 apscheduler==3.10.4
 uvloop==0.19.0; platform_system != 'Windows'
 orjson==3.10.7
-# Keep Pydantic <2.8 for aiogram 3.7.0
+# aiogram 3.7.0 needs pydantic <2.8
 pydantic==2.7.4
-# Match solana’s requirement (<0.24)
+# solana 0.30.x wants httpx <0.24
 httpx==0.23.3
 solana==0.30.2
-solders==0.21.0
+# match solana's constraint: >=0.18,<0.19
+solders==0.18.1
