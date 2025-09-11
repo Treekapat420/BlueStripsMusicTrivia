@@ -1,6 +1,6 @@
 import asyncio, time
 from datetime import datetime, timezone
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 from sqlalchemy import select, desc
@@ -12,6 +12,12 @@ from .models import User, Score, Wallet
 from .trivia import fetch_music_questions
 from .scheduler import schedule_jobs
 from .solana_payouts import PayoutClient
+
+import html
+
+def esc(s: object) -> str:
+    """Escape text for safe HTML in Telegram messages."""
+    return html.escape(str(s), quote=True)
 
 HELP = (
     "🎵 *Blue Strips Trivia Bot*\n"
@@ -183,27 +189,27 @@ async def _finalize_question_after(chat_id: int, chat_type: str):
             s.commit()
             awarded.append((u, pts))
 
-    # Build the summary message
+    # Build the summary message (escaped for HTML safety)
     total = len(answers)
     correct_count = len(correct_users)
     lines = [
-        f"⏰ Time! Correct answer: *{correct}*",
+        f"⏰ Time! Correct answer: <b>{esc(correct)}</b>",
         f"Answered: {total} • Correct: {correct_count}",
     ]
     if awarded:
         for u, pts in awarded[:12]:
             name = f"@{u.username}" if u.username else str(u.tg_id)
-            lines.append(f"✅ {name} (+{pts})")
+            lines.append(f"✅ {esc(name)} (+{pts})")
         if len(awarded) > 12:
             lines.append(f"...and {len(awarded)-12} more")
     else:
         lines.append("No correct answers this round.")
 
-    # Send and properly CLOSE the client session to avoid aiohttp warnings
+    # Send message safely
     from aiogram import Bot
     try:
         async with Bot(settings.bot_token) as bot:
-            await bot.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
+            await bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
     except Exception:
         pass
 
@@ -239,16 +245,20 @@ async def cmd_leaderboard(msg: Message):
     with SessionLocal() as s:
         wk = week_key()
         rows = s.execute(
-            select(Score, User).join(User, User.id==Score.user_id)
-            .where(Score.week_key==wk).order_by(desc(Score.points)).limit(15)
+            select(Score, User).join(User, User.id == Score.user_id)
+            .where(Score.week_key == wk)
+            .order_by(desc(Score.points))
+            .limit(15)
         ).all()
         if not rows:
             return await msg.answer("No scores yet this week. /join and /quiz to play!")
-        lines = [f"*Leaderboard {wk}*"]
+
+        out = [f"<b>Leaderboard {esc(wk)}</b>"]
         for i, (sc, u) in enumerate(rows, start=1):
             uname = f"@{u.username}" if u.username else str(u.tg_id)
-            lines.append(f"{i}. {uname}: {sc.points} pts ({sc.correct}✓/{sc.wrong}✗)")
-    await msg.answer("\n".join(lines), parse_mode="Markdown")
+            out.append(f"{i}. {esc(uname)}: {sc.points} pts ({sc.correct}✓/{sc.wrong}✗)")
+
+    await msg.answer("\n".join(out), parse_mode="HTML")
 
 async def cmd_myscore(msg: Message):
     with SessionLocal() as s:
