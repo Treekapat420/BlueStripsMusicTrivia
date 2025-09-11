@@ -70,7 +70,7 @@ async def cmd_help(msg: Message):
 async def cmd_rules(msg: Message):
     txt = (
         f"Scoring:\n"
-        f"• Correct +10 (cap {settings.streak_bonus_cap}).\n"
+        f"• Correct +10, Time bonus up to +5, Streak bonus +2 per correct (cap {settings.streak_bonus_cap}).\n"
         f"• Answer window: {settings.answer_seconds}s per question.\n"
         f"Use /answer A|B|C|D"
     )
