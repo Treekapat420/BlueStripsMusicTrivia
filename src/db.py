@@ -14,4 +14,4 @@ def _db_url():
     return f"sqlite:///{db_path}"
 
 engine = create_engine(_db_url(), echo=False, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True, expire_on_commit=False)
