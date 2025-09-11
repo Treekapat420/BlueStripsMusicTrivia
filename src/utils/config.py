@@ -7,7 +7,7 @@ load_dotenv()
 class Settings(BaseModel):
     bot_token: str = os.getenv("BOT_TOKEN", "")
     admin_ids: list[int] = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-    round_len: int = int(os.getenv("ROUND_LEN", 5))
+    round_len: int = int(os.getenv("ROUND_LEN", 1))
     answer_seconds: int = int(os.getenv("ANSWER_SECONDS", 20))
     streak_bonus_cap: int = int(os.getenv("STREAK_BONUS_CAP", 10))
     weekly_reset_day: str = os.getenv("WEEKLY_RESET_DAY", "SUN").upper()
