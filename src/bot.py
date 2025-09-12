@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
+from aiogram.enums import ChatMemberStatus
 from sqlalchemy import select, desc
 from sqlalchemy.orm import Session
 
@@ -18,6 +19,13 @@ import html
 def esc(s: object) -> str:
     """Escape text for safe HTML in Telegram messages."""
     return html.escape(str(s), quote=True)
+
+async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    member = await bot.get_chat_member(chat_id, user_id)
+    return member.status in (
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.OWNER,
+    )
 
 HELP = (
     "🎵 *Blue Strips Trivia Bot*\n"
@@ -107,7 +115,11 @@ async def cmd_wallet(msg: Message):
         s.commit()
     await msg.answer("Wallet saved ✅")
 
-async def cmd_quiz(msg: Message):
+async def cmd_quiz(msg: Message, bot: Bot):
+    # Restrict quiz start to admins only
+    if msg.chat.type in ("group", "supergroup"):
+        if not await is_admin(bot, msg.chat.id, msg.from_user.id):
+            return await msg.answer("🚫 Only group admins can start a quiz.")
     if msg.chat.id in LOCKED_CHATS:
         return await msg.answer("A round is already in progress. Finish it or wait a moment.")
     LOCKED_CHATS.add(msg.chat.id)
