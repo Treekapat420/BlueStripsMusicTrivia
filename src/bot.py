@@ -24,10 +24,8 @@ async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     member = await bot.get_chat_member(chat_id, user_id)
     return member.status in (
         ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.OWNER,
+        ChatMemberStatus.CREATOR,
     )
-except Exception:
-        return False
 
 HELP = (
     "🎵 *Blue Strips Trivia Bot*\n"
